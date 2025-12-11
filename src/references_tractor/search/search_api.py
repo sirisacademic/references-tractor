@@ -187,8 +187,10 @@ class OpenAlexStrategy(BaseAPIStrategy):
                 
                 if key == "locations.source.id":
                     filter_parts.append(f"{key}:{encoded_value}")
-                elif key in ["title.search", "raw_author_name.search"]:
+                elif key in ["raw_author_name.search"]:
                     filter_parts.append(f"{key}:{encoded_value}")
+                elif key in ["title.search"]:
+                    filter_parts.append(f'{key}:"{encoded_value}"')
                 elif key in ["publication_year", "doi"]:
                     filter_parts.append(f"{key}:{encoded_value}")
         

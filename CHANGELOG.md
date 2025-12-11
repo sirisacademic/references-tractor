@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2025-02-12
+### Added
+- Implemented citation–mention linking system from fulltext.
+- Added NER-based extraction of AUTHORS and PUBLICATION_YEAR for references.
+- Implemented regex-based mention matching using surname + year.
+- Added support for citation ID–based linking when `CITATION_ID` is present.
+- Added normalized-author matching (`Muench et al.` → `muench`).
+
+### Changed
+- Updated `extract_and_link_from_text()` to also compute NER for references.
+- Each reference now contains `claims_in_context` populated via mention–reference matching.
+- Improved NER entity grouping logic (merged split tokens like `"20" + "23"` → `"2023"`).
+- Improved prescreening & linking decision pipeline.
+
+### Fixed
+- Removed obsolete fields before matching when needed.
+
+### Notes
+- Matching logic prioritizes CITATION_ID when available.
+- Fallback uses (AUTHOR, YEAR) mention-based matching with normalization and fuzzy rules.
+
 ## [2.0.0] - 2025-06-23
 
 ### Architecture & API Support

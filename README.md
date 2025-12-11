@@ -1,43 +1,12 @@
 # References Tractor 🚜🖇️🧻🎓
 
-References Tractor (references-tractor) is a Python package designed to process raw citation texts and link them to scholarly knowledge graphs like OpenAlex, OpenAIRE, PubMed, CrossRef, and HAL. It leverages advanced natural language processing techniques powered by three small, fine-tuned language models to deliver accurate and robust citation parsing and linking.
+References in scientific literature are essential but notoriously messy: they are unstructured, heterogeneous, noisy, multilingual, and spread across diverse document types (policy reports, patents, scholarly papers, blogs, legal documents).
 
-![plot](docs/reference_tractor_image.png)
+**References Tractor** provides a modular, end-to-end pipeline for **reference detection, classification, parsing, retrieval, and re-ranking**, powered by fine-tuned small transformer models and **multi-API scholarly knowledge graphs** (which include: OpenAlex, OpenAIRE, PubMed, CrossRef, or HAL), to deliver accurate and robust citation parsing and linking.
 
-## 📑 Table of Contents
+This toolkit aims the barrier for large-scale citation extraction, metadata standardization, and bibliometric analysis in multilingual, real-world settings.
 
-- [🚀 Features](#-features)
-- [📊 System Architecture](#-system-architecture)
-- [🚀 Quick Start](#-quick-start)
-  - [Installation](#installation)
-  - [Basic Usage](#basic-usage)
-  - [Ensemble Linking](#ensemble-linking)
-  - [Batch Text Processing](#batch-text-processing)
-- [🔧 Supported APIs](#-supported-apis)
-- [⚙️ Configuration](#️-configuration)
-  - [Device Selection](#device-selection)
-  - [Caching Configuration](#caching-configuration)
-  - [Custom Model Paths](#custom-model-paths)
-- [📈 Evaluation System](#-evaluation-system)
-  - [Running Evaluations](#running-evaluations)
-  - [Evaluation Metrics](#evaluation-metrics)
-  - [Output Files](#output-files)
-- [🤖 Models](#-models)
-- [🎛️ API Reference](#️-api-reference)
-  - [Core Methods](#core-methods)
-- [📋 Output Formats](#-output-formats)
-  - [Simple Output](#simple-output)
-  - [Advanced Output](#advanced-output)
-  - [Ensemble Output](#ensemble-output)
-- [🔧 Performance Considerations](#-performance-considerations)
-  - [Hardware Requirements](#hardware-requirements)
-  - [Optimization Tips](#optimization-tips)
-- [📚 Documentation](#-documentation)
-- [🤝 Contributing](#-contributing)
-- [📄 License](#-license)
-- [📖 Citation](#-citation)
-- [🆘 Support](#-support)
-- [🙏 Acknowledgments](#-acknowledgments)
+<img src="docs/reference_tractor_image.png" alt="References Tractor" width="700"/>
 
 ## 🚀 Features
 
@@ -51,49 +20,20 @@ References Tractor (references-tractor) is a Python package designed to process 
 - **Caching System**: Reduce duplicate API calls and improve performance
 - **Device Flexibility**: Auto-detection and support for CPU, CUDA, and Apple Silicon (MPS)
 
-## 🔨 Key steps of the tools:
+## 🔨 How the Pipeline Works
+References Tractor follows a structured multi-step process to achieve accurate citation linking. Each stage is modular and extensible.
 
-References Tractor follows a structured multi-step process to achieve accurate citation linking:
+<img src="docs/pipeline.png" alt="Pipeline" width="500"/>
 
-1. **Pre-Screening**: a classification model based on `distilbert/distilbert-base-multilingual-cased` determines whether the given text is a valid citation or not.
-![image](docs/preescreening.png)
 
-2. **Citation Parsing (NER)**: sophisticated Named Entity Recognition (NER) extracts key fields from the citation. The citation is parsed into structured fields using a fine-tuned Named Entity Recognition model. The extracted fields can include:
-    - `TITLE`, `AUTHORS`, `VOLUME`, `ISSUE`, `YEAR`, `DOI`, `ISSN`, `ISBN`, `FIRST_PAGE`, `LAST_PAGE`, `JOURNAL`, and `EDITOR`.
-
-![image](docs/ner.png)
-
-3. **Candidate Identification**: a set of carefully crafted queries to the scholarly APIs retrieves one or more candidate publications based on the parsed citation fields.
-
-4. **Pairwise Classification**: a pairwise classification model predicts the likelihood of the identified candidates matching the original citation. This model is fine-tuned on a dataset of citation pairs in the format: `"CITATION 1 [SEP] CITATION 2"`. If multiple candidates are retrieved, the publication with the highest likelihood score is returned.
+1. **Reference Location / Span Extraction**: Identify where citations occur in the document. Detects both reference list entries and in-text citations from raw, noisy documents Handles multiple document genres: scholarly articles, reports, patents, technical standards, blogs, PDFs transformed to text. Identifies: `citation-span` (full reference in bibliography), inline `citation-ref` (e.g., `[12]`), `CITATION_ID`, `AUTHOR` groups, and `YEAR`.
+2. **Reference Citation Binary Classification**: Filter out which detected spans correspond to actual scholarly references. Why? In heterogeneous sources (policy reports, patents, grey literature), detected references may include: websites, laws & regulations, corporate documents,... A classifier (TYPE model) decides whether a detected citation should be passed downstream, enabling robust processing of noisy sources. Binary output: `scholarly reference` vs `non-scholarly reference`.
+3. **Citation Parsing (NER)**: sophisticated Named Entity Recognition (NER) extracts key fields from the citation. The citation is parsed into structured fields using a fine-tuned Named Entity Recognition model. The extracted fields can include: `TITLE`, `AUTHORS`, `VOLUME`, `ISSUE`, `YEAR`, `DOI`, `ISSN`, `ISBN`, `FIRST_PAGE`, `LAST_PAGE`, `JOURNAL`, and `EDITOR`.
+4. **Candidate Retrieval**: Using parsed fields, the system builds progressive search queries to scholarly APIs: OpenAlex, OpenAIRE, PubMed, CrossRef, or HAL. Retrieval expands from strict queries to softer ones (e.g., `title+author` → `title-only → fuzzy search`), maximizing recall without harming precision. This stage may return multiple candidate publications.
+5. **Pairwise Re-ranking (Candidate Selection)**: Choose the best matching publication among candidates. The SELECT model performs a pairwise comparison: `"CITATION_TEXT [SEP] CANDIDATE_METADATA"`. It outputs a probability that the candidate matches the input citation. Select candidates labeled True with confidence above threshold. If all candidates are labeled False, fallback to NER-based similarity heuristics. Optionally run ensemble DOI voting across multiple APIs.
 
 The best-matching candidate is selected based on the likelihood score and returned as the final linked publication.
 
-
-## 📊 System Architecture
-
-```mermaid
-graph TD
-    A[Raw Citation] --> B[Prescreening Model]
-    B --> C[NER Entity Extraction]
-    C --> D[Progressive API Search]
-    D --> E[Candidate Ranking]
-    E --> F[Result Selection]
-    F --> G[Formatted Citation]
-    
-    D --> H[OpenAlex]
-    D --> I[OpenAIRE] 
-    D --> J[PubMed]
-    D --> K[CrossRef]
-    D --> L[HAL]
-    
-    H --> M[Ensemble Voting]
-    I --> M
-    J --> M
-    K --> M
-    L --> M
-    M --> N[Consensus Result]
-```
 
 ## 🚀 Quick Start
 
@@ -110,23 +50,24 @@ pip install references-tractor
 git clone https://github.com/sirisacademic/references-tractor.git
 cd references-tractor
 
-# Install dependencies
-pip install -r requirements.txt
+# Create and activate a virtual environment
+uv venv
+source .venv/bin/activate  # (On Windows: .venv\Scripts\activate)
 
-# Install the package
-pip install -e .
+# Install the package in editable mode with all dependencies
+uv pip install -e .
 ```
 
 #### Optional Dependencies
 ```bash
 # For evaluation and analysis
-pip install -e .[evaluation]
+uv pip install -e .[evaluation]
 
 # For development tools
-pip install -e .[dev]
+uv pip install -e .[dev]
 
 # For performance optimization
-pip install -e .[performance]
+uv pip install -e .[performance]
 ```
 
 ### Basic Usage
@@ -169,6 +110,38 @@ linked_citations = ref_tractor.extract_and_link_from_text(text)
 for citation, result in linked_citations.items():
     print(f"Citation: {citation}")
     print(f"Linked to: {result.get('result', 'No match')}")
+```
+
+## Full-Text Extraction
+
+```python
+import requests
+from io import BytesIO
+from docling.document_converter import DocumentConverter
+from references_tractor import ReferencesTractor
+
+# Initialize Tractor
+ref_tractor = ReferencesTractor(debug=False)
+
+# Download PDF
+url = "https://publications.jrc.ec.europa.eu/repository/bitstream/JRC143151/JRC143151_01.pdf"
+pdf_bytes = requests.get(url).content
+
+# Create a Docling-compatible DocumentStream dict
+stream = {
+    "name": "JRC143151_01.pdf",
+    "stream": BytesIO(pdf_bytes)   # Docling accepts this when wrapped in a dict
+}
+
+# Convert
+converter = DocumentConverter()
+result = converter.convert(stream)
+
+# Export to Markdown
+md_text = result.document.export_to_markdown()
+
+# Process: extract references, link them, detect claims-in-context
+output = tractor.extract_and_link_from_text(md_text, api_target="openalex", plot=False)
 ```
 
 ## 🔧 Supported APIs
@@ -345,6 +318,27 @@ Extract named entities from citation text.
         "doi_vote_breakdown": {"10.1038/s41591-019-0123-4": 3}
     }
 }
+```
+
+### Fulltext Output
+
+```python
+{'id': '1',
+  'text': "E. Fuster, F. Massucci, and M. Matusiak, ''Identifying specialisation domains beyond taxonomies: Mapping scientific and technological domains of specialisation via semantic analyses,'' in Quantitative Methods for Place-Based Innovation Policy , R. Capello, A. Kleibrink, and M. Matusiak, Eds. U.K., Jan. 2020, pp. 195-234.",
+  'start': 79602,
+  'end': 79925,
+  'linked': {'result': 'Enric Fuster, Francesco A. Massucci, Monika Matusiak (2020). Identifying specialisation domains beyond taxonomies: mapping scientific and technological domains of specialisation via semantic analyses. Edward Elgar Publishing eBooks, None-None. DOI: 10.4337/9781789905519.00014',
+   'score': 0.9847521185874939,
+   'openalex_id': 'W3045128215',
+   'doi': '10.4337/9781789905519.00014',
+   'url': 'https://openalex.org/W3045128215',
+   'main_doi': '10.4337/9781789905519.00014',
+   'alternative_dois': [],
+   'total_dois': 1,
+   'all_dois': ['10.4337/9781789905519.00014']},
+  'claims_in_context': ['This is crucial for improving decision-making practices on priority setting and resource allocation (PSRA) [[REF]], [2].',
+   'Scientific publications provide a valuable source of information for exploring research portfolios and understanding the different contributions of research activities [[REF]].',
+   'One common challenge that these approaches face is that individual publications may be inaccurately classified because traditional categorization methods rely on scientific journals and do not account for overlap or emergent fields [[REF]].']}
 ```
 
 ## 🔧 Performance Considerations

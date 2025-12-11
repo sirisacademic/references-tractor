@@ -20,6 +20,8 @@ from transformers import (
 )
 from datasets import Dataset
 from transformers.pipelines.pt_utils import KeyDataset
+from .utils.span import extract_references_and_mentions, match_mentions_to_reference
+from .utils.prescreening import prescreen_references
 
 THRESHOLD_PARWISE_MODEL = 0.90 # Higher threshold for SELECT model
 THRESHOLD_NER_SIMILARITY = 0.60 # Lower threshold for NER similarity
@@ -253,15 +255,72 @@ class ReferencesTractor:
         }
 
     def process_ner_entities(self, citation: str) -> Dict[str, List[str]]:
-        # Extract named entities from the citation using the NER pipeline
-        output = self.ner_pipeline(citation)
-        entities = {}
-        for entity in output:
-            key = entity.get("entity_group")
-            entities.setdefault(key, []).append(entity.get("word", ""))
-        # Clean and validate entities using utility
-        cleaned_entities = EntityValidator.validate_and_clean_entities(entities)
-        return cleaned_entities
+        """
+        Run NER and merge adjacent fragments belonging to the same entity group.
+        Example: "20" + "23" → "2023"
+        """
+
+        raw = self.ner_pipeline(citation)
+
+        # STEP 1 — sort entities by start index
+        raw = sorted(raw, key=lambda x: x["start"])
+
+        merged = []
+        current = None
+
+        def flush():
+            nonlocal current, merged
+            if current:
+                merged.append(current)
+                current = None
+
+        for ent in raw:
+            group = ent["entity_group"]
+            word = ent["word"]
+            start = ent["start"]
+            end = ent["end"]
+
+            if current is None:
+                current = {
+                    "entity_group": group,
+                    "word": word,
+                    "start": start,
+                    "end": end,
+                    "score": ent["score"]
+                }
+                continue
+
+            # Check if mergeable:
+            same_group = (group == current["entity_group"])
+            touching = (start <= current["end"] + 1)
+
+            if same_group and touching:
+                # merge text
+                current["word"] += word
+                current["end"] = end
+                current["score"] = max(current["score"], ent["score"])
+            else:
+                flush()
+                current = {
+                    "entity_group": group,
+                    "word": word,
+                    "start": start,
+                    "end": end,
+                    "score": ent["score"]
+                }
+
+        flush()
+
+        # STEP 2 — convert into dict like before
+        entity_dict = {}
+        for ent in merged:
+            key = ent["entity_group"]
+            entity_dict.setdefault(key, []).append(ent["word"])
+
+        # STEP 3 — clean & validate using existing utility
+        cleaned = EntityValidator.validate_and_clean_entities(entity_dict)
+
+        return cleaned
 
     def generate_apa_citation(self, data: dict, api: str = "openalex") -> str:
         # Format a citation from retrieved metadata in APA style
@@ -704,63 +763,78 @@ class ReferencesTractor:
         self, outputs: List[List[Dict[str, Any]]], inputs: List[Any], 
         original_citation: str = None, api_target: str = None
     ) -> Tuple[Optional[Any], Optional[float]]:
-        
+
         if self.debug:
-            print(f"\n=== DEBUG: get_highest_true_position for {api_target} ===")
-            print(f"Original citation: {original_citation[:100]}...")
+            print(f"\n=== DEBUG: get_highest_true_position ===")
+            print(f"SELECT threshold={self.select_threshold}, NER threshold={self.ner_threshold}")
             print(f"Number of candidates: {len(inputs)}")
-            print(f"SELECT threshold: {self.select_threshold}, NER threshold: {self.ner_threshold}")
-        
-        # Get True labels with confidence threshold
+
         confident_true_scores = []
         uncertain_true_scores = []
-        
-        if self.debug:
-            print(f"\n--- Analyzing SELECT model outputs ---")
-        
+        any_true = False     # ← NEW FLAG
+
+        # ---- STEP 1: Analyze SELECT model outputs ----
         for i, result in enumerate(outputs):
-            label = result[0]['label']
-            score = result[0]['score']
-            
+            label = result[0]["label"]
+            score = result[0]["score"]
+
             if self.debug:
-                print(f"\nCandidate {i}: Label={label}, Score={score:.3f}")
-            
+                print(f"Candidate {i} → label={label}, score={score:.3f}")
+
             if label is True:
+                any_true = True
                 if score >= self.select_threshold:
                     confident_true_scores.append((i, score))
-                    if self.debug:
-                        print(f"  → Added to CONFIDENT True (score >= {self.select_threshold})")
                 else:
                     uncertain_true_scores.append((i, score))
-                    if self.debug:
-                        print(f"  → Added to UNCERTAIN True (score < {self.select_threshold})")
-        
+
+        # ---- NEW RULE: If ALL labels are False → STOP ----
+        if not any_true:
+            if self.debug:
+                print("\n✗ SELECT model says ALL candidates are FALSE → No match.")
+            return None, None
+        # ---------------------------------------------------
+
         if self.debug:
-            print(f"\nSUMMARY: {len(confident_true_scores)} confident, {len(uncertain_true_scores)} uncertain True labels")
-        
-        # First try confident True labels
+            print(f"\nSUMMARY: {len(confident_true_scores)} confident True, "
+                f"{len(uncertain_true_scores)} uncertain True")
+
+        # ---- STEP 2: Use confident True labels ----
         if confident_true_scores:
-            # NEW: Check for ties between confident candidates
             if len(confident_true_scores) > 1:
                 best_index, best_score = self._resolve_confident_candidates_tie(
                     confident_true_scores, inputs, original_citation, api_target
                 )
             else:
-                # Single confident candidate - use it directly
                 best_index, best_score = confident_true_scores[0]
-            
-            self._last_scoring_method = 'select_model'
-            
+
+            self._last_scoring_method = "select_model"
+
             if self.debug:
-                print(f"\n✓ DECISION: Using confident SELECT model")
-                print(f"  Selected candidate {best_index} with score {best_score:.3f}")
-                try:
-                    formatted = self.generate_apa_citation(inputs[best_index], api=api_target)
-                    print(f"  Selected citation: {formatted[:150]}...")
-                except:
-                    print(f"  (Could not format selected citation)")
-            
+                print(f"✓ Using SELECT confident match: {best_index}, score={best_score:.3f}")
+
             return inputs[best_index], best_score
+
+        # ---- STEP 3: NER validation of uncertain True ----
+        if uncertain_true_scores and original_citation and api_target:
+
+            validated = []
+            for i, sel_score in uncertain_true_scores:
+                formatted = self.generate_apa_citation(inputs[i], api=api_target)
+                ner_score = self.compute_ner_similarity(original_citation, formatted)
+
+                if ner_score >= self.ner_threshold:
+                    validated.append((i, ner_score))
+
+            if validated:
+                best_index, best_score = max(validated, key=lambda x: x[1])
+                self._last_scoring_method = "ner_similarity"
+                return inputs[best_index], best_score
+
+            if self.debug:
+                print("✗ No uncertain True labels passed NER validation.")
+        
+
         
         # If only uncertain True labels, validate with NER
         if uncertain_true_scores and original_citation and api_target:
@@ -1095,7 +1169,7 @@ class ReferencesTractor:
                 pub = pubs[0]
                 
                 # Check if SELECT model returned False OR low confidence - use NER similarity
-                if selected_score['label'] is False or selected_score['score'] < self.select_threshold:
+                if selected_score['label'] is True and selected_score['score'] < self.select_threshold:
                     ner_score = self.compute_ner_similarity(citation, cits[0])
                     if self.debug:
                         print(f"\nNER score: {ner_score}")
@@ -1340,34 +1414,65 @@ class ReferencesTractor:
 
             return result
     
+    def _debug_print_references(self, valid_refs, invalid_refs):
+        print("\n==================== VALID REFERENCES ====================")
+        for i, ref in enumerate(valid_refs, 1):
+            print(f"{i:2d}. {ref.get('id','')} → {ref.get('text','')}")
 
-    def extract_and_link_from_text(self, text: str, api_target: str = 'openalex') -> Dict[str, Dict[str, Any]]:
-        """
-        Extract citation entities from the provided text and link them to bibliographic data.
-        Now benefits from caching - repeated citations will be cached.
-        
-        Args:
-            text (str): The input text from which entities will be extracted.
-            api_target (str): The target API to use for citation linking (default is 'openalex').
+        print("\n==================== INVALID REFERENCES ====================")
+        for i, ref in enumerate(invalid_refs, 1):
+            print(f"{i:2d}. {ref.get('id','')} → {ref.get('text','')}")
 
-        Returns:
-            Dict[str, Dict[str, Any]]: A dictionary where each key is an entity and the value is the linked citation data.
-        """
-        # Step 1: Use the NER pipeline to extract entities from the text
-        ner_entities = self.span_pipeline(text)
-        
-        # Initialize the result dictionary
-        linked_entities = {}
+    def extract_and_link_from_text(self, text: str, api_target: str = "openalex", plot=False):
 
-        long_entities = [entity['word'] for entity in ner_entities if len(entity['word']) > 20]
+        extracted = extract_references_and_mentions(text, self.span_pipeline, plot=plot)
+
+        references = extracted["references"]
+        mentions = extracted["mentions"]
+
+        print("🔦 Running prescreening classsifier on references...")
+        screened_refs = prescreen_references(references, self.prescreening_pipeline)
+        invalid_refs = [r for r in references if r not in screened_refs]
+
+        print(f"📘 Total references extracted: {len(references)} ( ✔️ {len(screened_refs)} valid | ❌ {len(invalid_refs)} invalid )")
 
 
-        # Step 2: For each entity group, extract each entity and link it (with caching)
-        for entity in long_entities:
-            # Step 3: Link the entity to a citation using the link_citation method (cached)
-            linked_data = self.link_citation(entity, api_target=api_target)
+        # Debug printing
+        if self.debug:
+            self._debug_print_references(screened_refs, invalid_refs)
 
-            # Step 4: Add the linked citation data to the result dictionary
-            linked_entities[entity] = linked_data
+        print("🔗 Linking references\n")
 
-        return linked_entities
+        linked_references = []
+        for ref in tqdm(screened_refs, desc="Linking References", unit=" reference"):
+            ref_text = ref["text"]
+
+            ref_ner = self.process_ner_entities(ref_text)
+            ref['ner'] = ref_ner
+
+            try:
+                linked = self.link_citation(ref_text, api_target=api_target)
+            except Exception as e:
+                linked = {"error": str(e)}
+
+            matched_mentions = match_mentions_to_reference(ref, mentions)
+
+            ref.pop("ner", None)
+
+            linked_references.append({
+                **ref,          # keep id, text, start, end
+                "linked": linked,
+                "claims_in_context": matched_mentions
+            })
+
+            if self.debug:
+                print(f"• {ref_text[:60]}… → {linked.get('id', 'NO MATCH')}")
+
+        print(f"✅ Linked {len(linked_references)} references.\n")
+
+        # Return everything nicely packaged
+        return {
+            "references": linked_references,  # ← now includes linked metadata
+            "invalid_references": invalid_refs,
+            "mentions": mentions
+        }
